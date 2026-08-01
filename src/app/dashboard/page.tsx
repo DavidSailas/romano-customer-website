@@ -285,9 +285,10 @@ function DashboardPageInner() {
     fetchProfile();
   }, [user]);
 
-  // Load the customer's conversation with support, then stay live via Supabase Realtime
   useEffect(() => {
-    if (!user) {
+    const currentUserId = user?.id;
+
+    if (!currentUserId) {
       setMessages([]);
       return;
     }
@@ -299,7 +300,7 @@ function DashboardPageInner() {
       const { data, error } = await supabase
         .from("messages")
         .select("id, sender, content, created_at")
-        .eq("user_id", user.id)
+        .eq("user_id", currentUserId)
         .order("created_at", { ascending: true });
 
       if (isMounted && data && !error) {
@@ -310,10 +311,10 @@ function DashboardPageInner() {
     fetchMessages();
 
     const channel = supabase
-      .channel(`messages-${user.id}`)
+      .channel(`messages-${currentUserId}`)
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "messages", filter: `user_id=eq.${user.id}` },
+        { event: "INSERT", schema: "public", table: "messages", filter: `user_id=eq.${currentUserId}` },
         (payload) => {
           const incoming = payload.new as ChatMessage;
           setMessages((prev) => (prev.some((m) => m.id === incoming.id) ? prev : [...prev, incoming]));
@@ -1896,7 +1897,7 @@ function Combobox({
               {opt}
             </button>
           ))}
-        </div>
+         </div>
       )}
     </div>
   );
