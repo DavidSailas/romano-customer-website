@@ -34,6 +34,7 @@ export async function POST(req: Request) {
   }
 
   if (!verifySignature(rawBody, signatureHeader, process.env.PAYMONGO_WEBHOOK_SECRET)) {
+    console.error("Webhook signature verification failed");
     return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
   }
 
@@ -41,15 +42,46 @@ export async function POST(req: Request) {
   const eventType = event?.data?.attributes?.type;
   const eventData = event?.data?.attributes?.data;
 
+  console.log("PayMongo webhook received:", eventType);
+
   try {
     if (eventType === "checkout_session.payment.paid") {
       const orderId = eventData?.attributes?.metadata?.order_id;
-      if (orderId) {
-        await supabaseAdmin
-          .from("orders")
-          .update({ status: "placed", paid_at: new Date().toISOString() })
-          .eq("id", orderId)
-          .eq("status", "pending_payment"); // don't overwrite an already-processed order
+
+      if (!orderId) {
+        console.error("No order_id in webhook metadata", eventData?.attributes?.metadata);
+        return NextResponse.json({ received: true }); // ack anyway, nothing to do
+      }
+
+      // Only proceed if this order hasn't already been marked paid — .select()
+      // afterward tells us whether the update actually matched a row.
+      const { data: updatedOrders, error: updateError } = await supabaseAdmin
+        .from("orders")
+        .update({ status: "placed", paid_at: new Date().toISOString() })
+        .eq("id", orderId)
+        .eq("status", "pending_payment")
+        .select("id, items");
+
+      if (updateError) {
+        console.error("Failed to update order:", updateError.message);
+        return NextResponse.json({ error: updateError.message }, { status: 500 });
+      }
+
+      const order = updatedOrders?.[0];
+      if (order?.items) {
+        // Decrement stock for each purchased item now that payment is confirmed.
+        const items = order.items as { id: string }[];
+        for (const item of items) {
+          const { error: stockError } = await supabaseAdmin.rpc("decrement_stock", {
+            product_id: item.id,
+            qty: 1,
+          });
+          if (stockError) {
+            console.error(`Failed to decrement stock for product ${item.id}:`, stockError.message);
+          }
+        }
+      } else {
+        console.log(`Order ${orderId} already processed or not found — skipping stock update.`);
       }
     }
 

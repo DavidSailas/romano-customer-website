@@ -42,9 +42,12 @@ type Item = {
   price: number;
   stock: number;
   image_url: string | null;
+  sizes: string[] | null; 
 };
 
-const CATEGORIES = ["All", "T-Shirts", "Polo Shirts", "Jackets", "Caps", "Shorts", "Jeans"] as const;
+// Fallback only — used if the "categories" table is empty or the fetch fails.
+// The real filter list is loaded live from Supabase (see the `categories` state below).
+const FALLBACK_CATEGORIES = ["All", "T-Shirts", "Polo Shirts", "Jackets", "Caps", "Shorts", "Jeans"];
 
 // Full list of Philippine provinces (+ NCR), used to power the typeable Province combobox.
 const PH_PROVINCES = [
@@ -197,7 +200,29 @@ function formatChatTime(iso: string) {
 function DashboardPageInner() {
   const { user } = useUser();
   const [tab, setTab] = useState<Tab>("shop");
-  const [category, setCategory] = useState<(typeof CATEGORIES)[number]>("All");
+  const [category, setCategory] = useState<string>("All");
+  const [categories, setCategories] = useState<string[]>(["All"]);
+
+  // Load the real category list from Supabase so filter pills always match
+  // whatever exists in the admin panel (instead of a hardcoded array).
+  useEffect(() => {
+    let mounted = true;
+    supabase
+      .from("categories")
+      .select("title")
+      .order("sort_order", { ascending: true })
+      .then(({ data, error }) => {
+        if (!mounted) return;
+        if (error || !data || data.length === 0) {
+          setCategories(FALLBACK_CATEGORIES);
+          return;
+        }
+        setCategories(["All", ...data.map((row: any) => row.title)]);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const [products, setProducts] = useState<Item[]>([]);
   const [loadingProducts, setLoadingProducts] = useState(true);
@@ -205,6 +230,24 @@ function DashboardPageInner() {
   const [cart, setCart] = useState<string[]>([]);
   const [cartOpen, setCartOpen] = useState(false);
   const [selectedForCheckout, setSelectedForCheckout] = useState<string[]>([]);
+
+  const [selectedSizes, setSelectedSizes] = useState<Record<string, string>>({});
+
+  function pickSize(productId: string, size: string) {
+    setSelectedSizes((prev) => ({ ...prev, [productId]: size }));
+  }
+
+  // Quick View modal: click any product card to see a larger image plus
+  // similar pieces (matched by shared words in the title, e.g. "Fear of God").
+  const [quickViewItem, setQuickViewItem] = useState<Item | null>(null);
+
+  function openQuickView(item: Item) {
+    setQuickViewItem(item);
+  }
+
+  function closeQuickView() {
+    setQuickViewItem(null);
+  }
 
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [checkoutItems, setCheckoutItems] = useState<Item[]>([]);
@@ -237,11 +280,11 @@ function DashboardPageInner() {
   // switch to the Shop tab and pre-select that category filter.
   useEffect(() => {
     const cat = searchParams.get("category");
-    if (cat && (CATEGORIES as readonly string[]).includes(cat)) {
+    if (cat && categories.includes(cat)) {
       setTab("shop");
-      setCategory(cat as (typeof CATEGORIES)[number]);
+      setCategory(cat);
     }
-  }, [searchParams]);
+  }, [searchParams, categories]);
 
   const [chatOpen, setChatOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -257,13 +300,45 @@ function DashboardPageInner() {
       setLoadingProducts(true);
       const { data, error } = await supabase
         .from("products")
-        .select("id, title, category, price, stock, image_url")
+        .select("id, title, category, price, stock, sizes, image_url")
         .order("created_at", { ascending: false });
 
       if (data && !error) setProducts(data as Item[]);
       setLoadingProducts(false);
     }
     fetchProducts();
+
+    // Live-sync the storefront whenever the admin adds, edits, or removes a
+    // product — no refresh needed.
+    const channel = supabase
+      .channel("storefront_products")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "products" },
+        (payload) => {
+          const incoming = payload.new as Item;
+          setProducts((prev) => (prev.some((p) => p.id === incoming.id) ? prev : [incoming, ...prev]));
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "products" },
+        (payload) => {
+          const updated = payload.new as Item;
+          setProducts((prev) => prev.map((p) => (p.id === updated.id ? { ...p, ...updated } : p)));
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "DELETE", schema: "public", table: "products" },
+        (payload) => {
+          const removedId = (payload.old as { id: string }).id;
+          setProducts((prev) => prev.filter((p) => p.id !== removedId));
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
   }, []);
 
   // Fetch user profile data from public.profiles table
@@ -360,6 +435,43 @@ function DashboardPageInner() {
     });
   }
 
+  function withSize(item: Item): Item & { size?: string } {
+    return selectedSizes[item.id] ? { ...item, size: selectedSizes[item.id] } : item;
+  }
+
+  // Finds other pieces that likely share the same brand/collab by comparing
+  // significant words in the title (e.g. "New Era x Fear of God ESSENTIALS"
+  // matches other titles containing "Fear" and "God"). Falls back to items in
+  // the same category so the shelf always has something to suggest.
+  const TITLE_STOPWORDS = new Set([
+    "the", "and", "for", "with", "new", "of", "a", "an", "x", "by", "in", "on",
+  ]);
+
+  function getRelatedItems(item: Item, limit = 4): Item[] {
+    const words = item.title
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length > 2 && !TITLE_STOPWORDS.has(w));
+
+    const scored = products
+      .filter((p) => p.id !== item.id)
+      .map((p) => {
+        const pWords = new Set(p.title.toLowerCase().split(/[^a-z0-9]+/));
+        const shared = words.filter((w) => pWords.has(w)).length;
+        return { p, shared };
+      })
+      .filter((x) => x.shared > 0)
+      .sort((a, b) => b.shared - a.shared)
+      .map((x) => x.p);
+
+    if (scored.length >= limit) return scored.slice(0, limit);
+
+    const sameCategory = products.filter(
+      (p) => p.id !== item.id && p.category === item.category && !scored.some((s) => s.id === p.id)
+    );
+    return [...scored, ...sameCategory].slice(0, limit);
+  }
+
   function toggleSelectedForCheckout(id: string) {
     setSelectedForCheckout((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
@@ -378,6 +490,24 @@ function DashboardPageInner() {
   function closeCheckout() {
     if (placingOrder) return;
     setCheckoutOpen(false);
+  }
+
+  // Called the moment a purchase goes through (COD placed, or GCash/Bank checkout
+  // initiated) so the shelf reflects reality straight away — this is what makes a
+  // last-piece item (stock === 1) flip to "Sold Out" instead of staying listed.
+  async function decrementStock(items: (Item & { size?: string })[]) {
+    setProducts((prev) =>
+      prev.map((p) => {
+        const boughtQty = items.filter((i) => i.id === p.id).length;
+        return boughtQty > 0 ? { ...p, stock: Math.max(0, p.stock - boughtQty) } : p;
+      })
+    );
+
+    await Promise.all(
+      items.map((item) =>
+        supabase.from("products").update({ stock: Math.max(0, item.stock - 1) }).eq("id", item.id)
+      )
+    );
   }
 
   async function placeOrder() {
@@ -415,6 +545,7 @@ function DashboardPageInner() {
         });
         const data = await res.json();
         if (data.checkoutUrl) {
+          await decrementStock(checkoutItems);
           window.location.href = data.checkoutUrl; // Redirect to PayMongo GCash/Card page
           return;
         } else {
@@ -428,16 +559,20 @@ function DashboardPageInner() {
       // Handle Cash on Delivery (COD) normally
       setTimeout(() => {
         const placedIds = checkoutItems.map((i) => i.id);
-        const newOrders: Order[] = checkoutItems.map((item) => ({
-          id: `ORD-${Math.floor(1000 + Math.random() * 9000)}`,
-          itemName: item.title,
-          brand: item.category,
-          price: item.price,
-          date: new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }),
-          status: "placed",
-          swatch: ["#2B3A2A", "#425443"],
-        }));
+        const newOrders: Order[] = checkoutItems.map((item) => {
+          const size = (item as Item & { size?: string }).size;
+          return {
+            id: `ORD-${Math.floor(1000 + Math.random() * 9000)}`,
+            itemName: size ? `${item.title} (Size ${size})` : item.title,
+            brand: item.category,
+            price: item.price,
+            date: new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }),
+            status: "placed",
+            swatch: ["#2B3A2A", "#425443"],
+          };
+        });
 
+        decrementStock(checkoutItems);
         setOrders((prev) => [...newOrders, ...prev]);
         setCart((prev) => prev.filter((id) => !placedIds.includes(id)));
         setSelectedForCheckout((prev) => prev.filter((id) => !placedIds.includes(id)));
@@ -701,6 +836,143 @@ function DashboardPageInner() {
         }
         .romano-dash-root .item-card { transition: transform 0.3s ease, box-shadow 0.3s ease; }
         .romano-dash-root .item-card:hover { transform: translateY(-3px); box-shadow: 0 16px 30px rgba(28,24,21,0.1); }
+
+        .romano-dash-root .sold-out-ribbon {
+          position: absolute;
+          top: 14px;
+          right: -34px;
+          width: 150px;
+          padding: 5px 0;
+          background: var(--oxide);
+          color: var(--stone-light);
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.12em;
+          text-align: center;
+          text-transform: uppercase;
+          transform: rotate(35deg);
+          box-shadow: 0 3px 8px rgba(28,24,21,0.25);
+          pointer-events: none;
+        }
+        .romano-dash-root .quickview-related-sold {
+          position: absolute;
+          inset: 0;
+          background: rgba(28,24,21,0.55);
+          color: var(--stone-light);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 8px;
+          font-weight: 700;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          text-align: center;
+          padding: 2px;
+        }
+
+        .romano-dash-root .size-chip {
+          padding: 0.3rem 0.65rem;
+          font-size: 0.72rem;
+          font-weight: 600;
+          border-radius: 6px;
+          border: 1px solid rgba(28,24,21,0.18);
+          background: transparent;
+          opacity: 0.75;
+          transition: all 0.15s ease;
+        }
+        .romano-dash-root .size-chip:hover { opacity: 1; }
+        .romano-dash-root .size-chip.active {
+          background: var(--verde);
+          border-color: var(--verde);
+          color: var(--stone-light);
+          opacity: 1;
+        }
+
+        .romano-dash-root .quickview-overlay {
+          position: fixed;
+          inset: 0;
+          background: rgba(28,24,21,0.55);
+          z-index: 60;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 24px;
+        }
+        .romano-dash-root .quickview-modal {
+          position: relative;
+          width: 100%;
+          max-width: 820px;
+          max-height: 88vh;
+          background: var(--stone-light);
+          border-radius: 14px;
+          box-shadow: 0 24px 60px rgba(0,0,0,0.28);
+          overflow: hidden;
+          display: flex;
+          flex-direction: column;
+        }
+        .romano-dash-root .quickview-close {
+          position: absolute;
+          top: 14px;
+          right: 14px;
+          z-index: 5;
+          width: 34px;
+          height: 34px;
+          border-radius: 999px;
+          background: var(--stone-light);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          opacity: 0.75;
+          box-shadow: 0 2px 8px rgba(28,24,21,0.15);
+        }
+        .romano-dash-root .quickview-close:hover { opacity: 1; }
+        .romano-dash-root .quickview-scroll {
+          overflow-y: auto;
+          padding: 28px;
+        }
+        .romano-dash-root .quickview-top {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 28px;
+        }
+        @media (min-width: 640px) {
+          .romano-dash-root .quickview-top { grid-template-columns: 1fr 1fr; }
+        }
+        .romano-dash-root .quickview-image {
+          position: relative;
+          aspect-ratio: 4 / 5;
+          border-radius: 10px;
+          overflow: hidden;
+          background: rgba(28,24,21,0.06);
+        }
+        .romano-dash-root .quickview-info { display: flex; flex-direction: column; justify-content: center; }
+
+        .romano-dash-root .quickview-related {
+          margin-top: 32px;
+          padding-top: 24px;
+          border-top: 1px solid rgba(28,24,21,0.08);
+        }
+        .romano-dash-root .quickview-related-grid {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+        }
+        .romano-dash-root .quickview-related-card {
+          position: relative;
+          width: 64px;
+          height: 64px;
+          border-radius: 8px;
+          overflow: hidden;
+          background: rgba(28,24,21,0.06);
+          border: 1px solid rgba(28,24,21,0.08);
+          flex-shrink: 0;
+          transition: opacity 0.15s ease, border-color 0.15s ease;
+        }
+        .romano-dash-root .quickview-related-card:hover {
+          opacity: 0.8;
+          border-color: rgba(28,24,21,0.2);
+        }
+
         .romano-dash-root a:focus-visible,
         .romano-dash-root button:focus-visible {
           outline: 2px solid var(--brass);
@@ -917,6 +1189,16 @@ function DashboardPageInner() {
         }
         .romano-dash-root .chat-fab:hover { background: var(--verde-dark); transform: translateY(-2px); }
         .romano-dash-root .chat-fab .cart-badge { top: -4px; right: -4px; }
+        .romano-dash-root .chat-unread-dot {
+          position: absolute;
+          top: 2px;
+          right: 2px;
+          width: 13px;
+          height: 13px;
+          border-radius: 999px;
+          background: #ef4444;
+          border: 2px solid var(--verde);
+        }
 
         .romano-dash-root .chat-panel {
           position: fixed;
@@ -1081,7 +1363,7 @@ function DashboardPageInner() {
             </div>
 
             <div className="flex gap-2 overflow-x-auto pb-2 mb-8 -mx-1 px-1">
-              {CATEGORIES.map((c) => (
+              {categories.map((c) => (
                 <button
                   key={c}
                   onClick={() => setCategory(c)}
@@ -1109,8 +1391,17 @@ function DashboardPageInner() {
                 {visibleItems.map((item) => {
                   const inCart = cart.includes(item.id);
                   const inStock = item.stock > 0;
+                  // Caps are one-size-fits-all; every other category shows a size picker
+                  // when the admin has set sizes for that product.
+                  const hasSizes = item.category !== "Caps" && !!item.sizes && item.sizes.length > 0;
+                  const selectedSize = selectedSizes[item.id];
+                  const needsSize = hasSizes && !selectedSize;
                   return (
-                    <div key={item.id} className="item-card card overflow-hidden">
+                    <div
+                      key={item.id}
+                      className="item-card card overflow-hidden cursor-pointer"
+                      onClick={() => openQuickView(item)}
+                    >
                       <div className="aspect-[4/5] relative overflow-hidden" style={{ background: "rgba(28,24,21,0.06)" }}>
                         {item.image_url ? (
                           <img
@@ -1123,6 +1414,7 @@ function DashboardPageInner() {
                             <Shirt size={28} className="opacity-30" />
                           </div>
                         )}
+                        {!inStock && <div className="sold-out-ribbon">Sold Out</div>}
                       </div>
                       <div className="p-4">
                         <div className="flex items-start justify-between gap-2 mb-1">
@@ -1134,21 +1426,40 @@ function DashboardPageInner() {
                               color: inStock ? "var(--verde)" : "var(--oxide)",
                             }}
                           >
-                            {inStock ? "In Stock" : "Out of Stock"}
+                            {inStock ? "In Stock" : "Sold Out"}
                           </span>
                         </div>
                         <h3 className="font-display text-base mb-1">{item.title}</h3>
                         <p className="font-display text-lg mb-3">₱{item.price.toLocaleString()}</p>
 
+                        {hasSizes && inStock && (
+                          <div className="mb-3" onClick={(e) => e.stopPropagation()}>
+                            <p className="text-[10px] uppercase tracking-widest opacity-50 mb-1.5">Size</p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {item.sizes!.map((s) => (
+                                <button
+                                  key={s}
+                                  type="button"
+                                  onClick={() => pickSize(item.id, s)}
+                                  aria-pressed={selectedSize === s}
+                                  className={`size-chip ${selectedSize === s ? "active" : ""}`}
+                                >
+                                  {s}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
                         {!inStock && !inCart && (
                           <button disabled className="btn-primary w-full opacity-40 cursor-not-allowed">
-                            Out of Stock
+                            Sold Out
                           </button>
                         )}
 
                         {!inStock && inCart && (
                           <button
-                            onClick={() => toggleCartItem(item.id)}
+                            onClick={(e) => { e.stopPropagation(); toggleCartItem(item.id); }}
                             className="btn-secondary w-full"
                             style={{ color: "var(--oxide)", borderColor: "rgba(138,59,42,0.3)" }}
                           >
@@ -1157,17 +1468,29 @@ function DashboardPageInner() {
                         )}
 
                         {inStock && (
-                          <div className="flex items-center gap-2">
-                            <button onClick={() => openCheckout([item])} className="btn-primary flex-1">
-                              <Zap size={13} /> Buy Now
-                            </button>
-                            <button
-                              onClick={() => toggleCartItem(item.id)}
-                              aria-label={inCart ? `Remove ${item.title} from cart` : `Add ${item.title} to cart`}
-                              className={`btn-secondary btn-icon ${inCart ? "btn-icon-active" : ""}`}
-                            >
-                              {inCart ? <Trash2 size={16} /> : <ShoppingBag size={16} />}
-                            </button>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={(e) => { e.stopPropagation(); if (!needsSize) openCheckout([withSize(item)]); }}
+                                disabled={needsSize}
+                                className={`btn-primary flex-1 ${needsSize ? "opacity-40 cursor-not-allowed" : ""}`}
+                              >
+                                <Zap size={13} /> Buy Now
+                              </button>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); if (!needsSize) toggleCartItem(item.id); }}
+                                disabled={needsSize && !inCart}
+                                aria-label={inCart ? `Remove ${item.title} from cart` : `Add ${item.title} to cart`}
+                                className={`btn-secondary btn-icon ${inCart ? "btn-icon-active" : ""} ${needsSize && !inCart ? "opacity-40 cursor-not-allowed" : ""}`}
+                              >
+                                {inCart ? <Trash2 size={16} /> : <ShoppingBag size={16} />}
+                              </button>
+                            </div>
+                            {needsSize && (
+                              <p className="text-[11px] mt-1.5" style={{ color: "var(--oxide)" }}>
+                                Please select a size
+                              </p>
+                            )}
                           </div>
                         )}
                       </div>
@@ -1497,7 +1820,10 @@ function DashboardPageInner() {
                           )}
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className="text-xs uppercase tracking-widest opacity-55">{item.category}</p>
+                          <p className="text-xs uppercase tracking-widest opacity-55">
+                            {item.category}
+                            {selectedSizes[item.id] ? ` · Size ${selectedSizes[item.id]}` : ""}
+                          </p>
                           <p className="font-display text-sm mb-1.5 truncate">{item.title}</p>
                           <div className="flex items-center justify-between">
                             <span className="text-sm font-medium">₱{item.price.toLocaleString()}</span>
@@ -1537,7 +1863,7 @@ function DashboardPageInner() {
                     Proceed to Checkout <ArrowRight size={15} />
                   </button>
                 ) : (
-                  <button onClick={() => openCheckout(selectedCartItems)} className="btn-primary w-full">
+                  <button onClick={() => openCheckout(selectedCartItems.map(withSize))} className="btn-primary w-full">
                     Proceed to Checkout <ArrowRight size={15} />
                   </button>
                 )}
@@ -1605,7 +1931,10 @@ function DashboardPageInner() {
                           )}
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className="text-xs uppercase tracking-widest opacity-55">{item.category}</p>
+                          <p className="text-xs uppercase tracking-widest opacity-55">
+                            {item.category}
+                            {(item as Item & { size?: string }).size ? ` · Size ${(item as Item & { size?: string }).size}` : ""}
+                          </p>
                           <p className="font-display text-sm truncate">{item.title}</p>
                         </div>
                         <span className="text-sm font-medium shrink-0">₱{item.price.toLocaleString()}</span>
@@ -1731,7 +2060,158 @@ function DashboardPageInner() {
         </div>
       )}
 
-      {/* ---------------- SUPPORT CHAT ---------------- */}
+      {/* ---------------- QUICK VIEW MODAL ---------------- */}
+      {quickViewItem && (
+        <div className="quickview-overlay" onClick={closeQuickView}>
+          <div className="quickview-modal" onClick={(e) => e.stopPropagation()}>
+            <button aria-label="Close" onClick={closeQuickView} className="quickview-close">
+              <X size={18} />
+            </button>
+
+            <div className="quickview-scroll">
+              <div className="quickview-top">
+                <div className="quickview-image">
+                  {quickViewItem.image_url ? (
+                    <img src={quickViewItem.image_url} alt={quickViewItem.title} className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center">
+                      <Shirt size={32} className="opacity-30" />
+                    </div>
+                  )}
+                  {quickViewItem.stock <= 0 && <div className="sold-out-ribbon">Sold Out</div>}
+                </div>
+
+                <div className="quickview-info">
+                  <p className="text-xs uppercase tracking-widest opacity-55 mb-1.5">{quickViewItem.category}</p>
+                  <h2 className="font-display text-2xl mb-2">{quickViewItem.title}</h2>
+                  <p className="font-display text-xl mb-3">₱{quickViewItem.price.toLocaleString()}</p>
+                  <span
+                    className="text-[10px] uppercase tracking-widest px-2 py-0.5 rounded-full inline-block mb-4"
+                    style={{
+                      background: quickViewItem.stock > 0 ? "rgba(43,58,42,0.1)" : "rgba(138,59,42,0.1)",
+                      color: quickViewItem.stock > 0 ? "var(--verde)" : "var(--oxide)",
+                    }}
+                  >
+                    {quickViewItem.stock > 0 ? "In Stock" : "Sold Out"}
+                  </span>
+
+                  {(() => {
+                    const item = quickViewItem;
+                    const inCart = cart.includes(item.id);
+                    const inStock = item.stock > 0;
+                    const hasSizes = item.category !== "Caps" && !!item.sizes && item.sizes.length > 0;
+                    const selectedSize = selectedSizes[item.id];
+                    const needsSize = hasSizes && !selectedSize;
+
+                    return (
+                      <>
+                        {hasSizes && inStock && (
+                          <div className="mb-5">
+                            <p className="text-[10px] uppercase tracking-widest opacity-50 mb-1.5">Size</p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {item.sizes!.map((s) => (
+                                <button
+                                  key={s}
+                                  type="button"
+                                  onClick={() => pickSize(item.id, s)}
+                                  aria-pressed={selectedSize === s}
+                                  className={`size-chip ${selectedSize === s ? "active" : ""}`}
+                                >
+                                  {s}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {!inStock && !inCart && (
+                          <button disabled className="btn-primary w-full opacity-40 cursor-not-allowed">
+                            Sold Out
+                          </button>
+                        )}
+
+                        {!inStock && inCart && (
+                          <button
+                            onClick={() => toggleCartItem(item.id)}
+                            className="btn-secondary w-full"
+                            style={{ color: "var(--oxide)", borderColor: "rgba(138,59,42,0.3)" }}
+                          >
+                            <Trash2 size={14} /> Remove from Cart
+                          </button>
+                        )}
+
+                        {inStock && (
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => {
+                                  if (needsSize) return;
+                                  closeQuickView();
+                                  openCheckout([withSize(item)]);
+                                }}
+                                disabled={needsSize}
+                                className={`btn-primary flex-1 ${needsSize ? "opacity-40 cursor-not-allowed" : ""}`}
+                              >
+                                <Zap size={13} /> Buy Now
+                              </button>
+                              <button
+                                onClick={() => !needsSize && toggleCartItem(item.id)}
+                                disabled={needsSize && !inCart}
+                                aria-label={inCart ? `Remove ${item.title} from cart` : `Add ${item.title} to cart`}
+                                className={`btn-secondary btn-icon ${inCart ? "btn-icon-active" : ""} ${needsSize && !inCart ? "opacity-40 cursor-not-allowed" : ""}`}
+                              >
+                                {inCart ? <Trash2 size={16} /> : <ShoppingBag size={16} />}
+                              </button>
+                            </div>
+                            {needsSize && (
+                              <p className="text-[11px] mt-1.5" style={{ color: "var(--oxide)" }}>
+                                Please select a size
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+
+              {(() => {
+                const related = getRelatedItems(quickViewItem);
+                if (related.length === 0) return null;
+                return (
+                  <div className="quickview-related">
+                    <p className="text-xs uppercase tracking-widest opacity-50 mb-3">You Might Also Like</p>
+                    <div className="quickview-related-grid">
+                      {related.map((r) => (
+                        <button
+                          key={r.id}
+                          type="button"
+                          onClick={() => setQuickViewItem(r)}
+                          className="quickview-related-card"
+                          title={`${r.title} — ₱${r.price.toLocaleString()}`}
+                          aria-label={`View ${r.title}, ₱${r.price.toLocaleString()}`}
+                        >
+                          {r.image_url ? (
+                            <img src={r.image_url} alt={r.title} className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center">
+                              <Shirt size={18} className="opacity-30" />
+                            </div>
+                          )}
+                          {r.stock <= 0 && <div className="quickview-related-sold">Sold</div>}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
+
+
       {user && !chatOpen && (
         <button
           onClick={() => setChatOpen(true)}
@@ -1739,7 +2219,7 @@ function DashboardPageInner() {
           className="chat-fab"
         >
           <MessageCircle size={22} />
-          {unreadCount > 0 && <span className="cart-badge">{unreadCount}</span>}
+          {unreadCount > 0 && <span className="chat-unread-dot" />}
         </button>
       )}
 

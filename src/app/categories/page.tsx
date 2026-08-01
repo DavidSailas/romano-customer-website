@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { COLLECTIONS } from "@/lib/collections";
+import { fetchCollections } from "@/lib/collections";
 
 /* ------------------------------------------------------------------ */
 /*  /categories — index of every shop category.                       */
@@ -10,14 +10,25 @@ import { COLLECTIONS } from "@/lib/collections";
 /*  Cards link straight into the dashboard's Shop tab with the         */
 /*  category pre-selected (?category=Jackets), instead of the old      */
 /*  standalone /categories/[slug] "coming soon" page.                  */
+/*                                                                      */
+/*  Categories are fetched live from Supabase on every request, so     */
+/*  anything added/edited/deleted in the admin panel shows up here     */
+/*  immediately without a redeploy.                                    */
 /* ------------------------------------------------------------------ */
+
+// Always hit the database fresh — don't let Next.js cache this route,
+// otherwise newly added categories won't appear until a rebuild.
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export const metadata = {
   title: "Shop By Category — House of Romano",
   description: "Jeans, shorts, jackets, caps, and everyday clothing from the brands you already trust.",
 };
 
-export default function CategoriesIndexPage() {
+export default async function CategoriesIndexPage() {
+  const collections = await fetchCollections();
+
   return (
     <div className="romano-cat-root">
       <style>{`
@@ -82,10 +93,10 @@ export default function CategoriesIndexPage() {
         </p>
 
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-8">
-          {COLLECTIONS.map((c) => (
+          {collections.map((c) => (
             <Link
               href={`/dashboard?category=${encodeURIComponent(c.title)}`}
-              key={c.slug}
+              key={c.id ?? c.slug}
               className="collection-card group block"
             >
               <div
@@ -109,6 +120,9 @@ export default function CategoriesIndexPage() {
               <p className="text-sm opacity-70 leading-snug">{c.copy}</p>
             </Link>
           ))}
+          {collections.length === 0 && (
+            <p className="opacity-60 text-sm">No categories yet — check back soon.</p>
+          )}
         </div>
       </section>
     </div>
