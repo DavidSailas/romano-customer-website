@@ -42,7 +42,12 @@ type Item = {
   price: number;
   stock: number;
   image_url: string | null;
-  sizes: string[] | null; 
+  image_urls?: string[] | null;
+  sizes: string[] | null;
+  brand?: string | null;
+  style?: string | null;
+  color?: string | null;
+  condition?: string | null;
 };
 
 // Fallback only — used if the "categories" table is empty or the fetch fails.
@@ -191,6 +196,7 @@ type ChatMessage = {
   sender: "customer" | "admin";
   content: string;
   created_at: string;
+  read?: boolean;
 };
 
 function formatChatTime(iso: string) {
@@ -240,9 +246,11 @@ function DashboardPageInner() {
   // Quick View modal: click any product card to see a larger image plus
   // similar pieces (matched by shared words in the title, e.g. "Fear of God").
   const [quickViewItem, setQuickViewItem] = useState<Item | null>(null);
+  const [quickViewImageIndex, setQuickViewImageIndex] = useState(0);
 
   function openQuickView(item: Item) {
     setQuickViewItem(item);
+    setQuickViewImageIndex(0);
   }
 
   function closeQuickView() {
@@ -300,7 +308,7 @@ function DashboardPageInner() {
       setLoadingProducts(true);
       const { data, error } = await supabase
         .from("products")
-        .select("id, title, category, price, stock, sizes, image_url")
+        .select("id, title, category, price, stock, sizes, image_url, image_urls, brand, style, color, condition")
         .order("created_at", { ascending: false });
 
       if (data && !error) setProducts(data as Item[]);
@@ -374,12 +382,20 @@ function DashboardPageInner() {
       setLoadingMessages(true);
       const { data, error } = await supabase
         .from("messages")
-        .select("id, sender, content, created_at")
+        .select("id, sender, content, created_at, read")
         .eq("user_id", currentUserId)
         .order("created_at", { ascending: true });
 
       if (isMounted && data && !error) {
         setMessages(data as ChatMessage[]);
+        // Seed the badge with any admin messages the customer hasn't seen yet —
+        // e.g. sent while they were logged out or on a different page.
+        const alreadyUnread = (data as ChatMessage[]).filter(
+          (m) => m.sender === "admin" && !m.read
+        ).length;
+        if (alreadyUnread > 0 && !chatOpen) {
+          setUnreadCount(alreadyUnread);
+        }
       }
       setLoadingMessages(false);
     }
@@ -411,6 +427,20 @@ function DashboardPageInner() {
     if (chatOpen) {
       setUnreadCount(0);
       chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: "smooth" });
+
+      // Persist "read" so the badge doesn't come back on the next page load.
+      const currentUserId = user?.id;
+      if (currentUserId) {
+        supabase
+          .from("messages")
+          .update({ read: true })
+          .eq("user_id", currentUserId)
+          .eq("sender", "admin")
+          .eq("read", false)
+          .then(({ error }) => {
+            if (error) console.error("Failed to mark messages read:", error.message);
+          });
+      }
     }
   }, [chatOpen, messages]);
 
@@ -940,12 +970,69 @@ function DashboardPageInner() {
         }
         .romano-dash-root .quickview-image {
           position: relative;
+        }
+        .romano-dash-root .quickview-gallery {
+          display: flex;
+          gap: 10px;
+        }
+        .romano-dash-root .quickview-thumbs {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          overflow-y: auto;
+          max-height: 420px;
+        }
+        .romano-dash-root .quickview-thumb {
+          width: 52px;
+          height: 52px;
+          border-radius: 6px;
+          overflow: hidden;
+          border: 1.5px solid transparent;
+          cursor: pointer;
+          flex-shrink: 0;
+          background: rgba(28,24,21,0.06);
+          padding: 0;
+        }
+        .romano-dash-root .quickview-thumb.active {
+          border-color: var(--verde);
+        }
+        .romano-dash-root .quickview-main-image {
+          flex: 1;
+          min-width: 0;
+          position: relative;
           aspect-ratio: 4 / 5;
           border-radius: 10px;
           overflow: hidden;
           background: rgba(28,24,21,0.06);
         }
         .romano-dash-root .quickview-info { display: flex; flex-direction: column; justify-content: center; }
+        .romano-dash-root .quickview-details {
+          margin: 0;
+        }
+        .romano-dash-root .quickview-details-row {
+          display: flex;
+          justify-content: space-between;
+          align-items: baseline;
+          gap: 16px;
+          padding: 8px 0;
+          border-bottom: 1px solid rgba(28,24,21,0.08);
+        }
+        .romano-dash-root .quickview-details-row:last-child {
+          border-bottom: none;
+        }
+        .romano-dash-root .quickview-details-row dt {
+          font-size: 12.5px;
+          color: rgba(28,24,21,0.5);
+          font-weight: 500;
+          white-space: nowrap;
+        }
+        .romano-dash-root .quickview-details-row dd {
+          margin: 0;
+          text-align: right;
+          font-size: 13px;
+          font-weight: 500;
+          color: var(--ink);
+        }
 
         .romano-dash-root .quickview-related {
           margin-top: 32px;
@@ -955,22 +1042,48 @@ function DashboardPageInner() {
         .romano-dash-root .quickview-related-grid {
           display: flex;
           flex-wrap: wrap;
-          gap: 10px;
+          gap: 16px;
         }
         .romano-dash-root .quickview-related-card {
+          display: flex;
+          flex-direction: column;
+          align-items: flex-start;
+          width: 112px;
+          flex-shrink: 0;
+          text-align: left;
+          transition: opacity 0.15s ease;
+        }
+        .romano-dash-root .quickview-related-card:hover {
+          opacity: 0.8;
+        }
+        .romano-dash-root .quickview-related-image {
           position: relative;
-          width: 64px;
-          height: 64px;
+          width: 100%;
+          aspect-ratio: 1 / 1;
           border-radius: 8px;
           overflow: hidden;
           background: rgba(28,24,21,0.06);
           border: 1px solid rgba(28,24,21,0.08);
-          flex-shrink: 0;
-          transition: opacity 0.15s ease, border-color 0.15s ease;
+          margin-bottom: 7px;
+          transition: border-color 0.15s ease;
         }
-        .romano-dash-root .quickview-related-card:hover {
-          opacity: 0.8;
+        .romano-dash-root .quickview-related-card:hover .quickview-related-image {
           border-color: rgba(28,24,21,0.2);
+        }
+        .romano-dash-root .quickview-related-title {
+          font-size: 11.5px;
+          line-height: 1.35;
+          color: var(--ink);
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+        .romano-dash-root .quickview-related-price {
+          font-size: 11.5px;
+          font-weight: 600;
+          margin-top: 2px;
+          color: var(--ink);
         }
 
         .romano-dash-root a:focus-visible,
@@ -2071,13 +2184,42 @@ function DashboardPageInner() {
             <div className="quickview-scroll">
               <div className="quickview-top">
                 <div className="quickview-image">
-                  {quickViewItem.image_url ? (
-                    <img src={quickViewItem.image_url} alt={quickViewItem.title} className="w-full h-full object-cover" />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center">
-                      <Shirt size={32} className="opacity-30" />
-                    </div>
-                  )}
+                  {(() => {
+                    const gallery = quickViewItem.image_urls && quickViewItem.image_urls.length > 0
+                      ? quickViewItem.image_urls
+                      : (quickViewItem.image_url ? [quickViewItem.image_url] : []);
+                    const activeSrc = gallery[quickViewImageIndex] ?? gallery[0];
+
+                    return (
+                      <div className="quickview-gallery">
+                        {gallery.length > 1 && (
+                          <div className="quickview-thumbs">
+                            {gallery.map((src, i) => (
+                              <button
+                                key={src + i}
+                                type="button"
+                                onClick={() => setQuickViewImageIndex(i)}
+                                aria-label={`View image ${i + 1} of ${quickViewItem.title}`}
+                                aria-current={i === quickViewImageIndex}
+                                className={`quickview-thumb ${i === quickViewImageIndex ? "active" : ""}`}
+                              >
+                                <img src={src} alt="" className="w-full h-full object-cover" />
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <div className="quickview-main-image">
+                          {activeSrc ? (
+                            <img src={activeSrc} alt={quickViewItem.title} className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center">
+                              <Shirt size={32} className="opacity-30" />
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
                   {quickViewItem.stock <= 0 && <div className="sold-out-ribbon">Sold Out</div>}
                 </div>
 
@@ -2094,6 +2236,44 @@ function DashboardPageInner() {
                   >
                     {quickViewItem.stock > 0 ? "In Stock" : "Sold Out"}
                   </span>
+
+                  {(quickViewItem.brand || quickViewItem.style || quickViewItem.color || quickViewItem.condition || (quickViewItem.sizes && quickViewItem.sizes.length > 0)) && (
+                    <div className="mb-5">
+                      <p className="text-[10px] uppercase tracking-widest opacity-50 mb-2">Details</p>
+                      <dl className="quickview-details">
+                        {quickViewItem.brand && (
+                          <div className="quickview-details-row">
+                            <dt>Brand</dt>
+                            <dd>{quickViewItem.brand}</dd>
+                          </div>
+                        )}
+                        {quickViewItem.style && (
+                          <div className="quickview-details-row">
+                            <dt>Style</dt>
+                            <dd>{quickViewItem.style}</dd>
+                          </div>
+                        )}
+                        {quickViewItem.color && (
+                          <div className="quickview-details-row">
+                            <dt>Color</dt>
+                            <dd>{quickViewItem.color}</dd>
+                          </div>
+                        )}
+                        {quickViewItem.sizes && quickViewItem.sizes.length > 0 && (
+                          <div className="quickview-details-row">
+                            <dt>Size</dt>
+                            <dd>{quickViewItem.sizes.join(", ")}</dd>
+                          </div>
+                        )}
+                        {quickViewItem.condition && (
+                          <div className="quickview-details-row">
+                            <dt>Condition</dt>
+                            <dd>{quickViewItem.condition}</dd>
+                          </div>
+                        )}
+                      </dl>
+                    </div>
+                  )}
 
                   {(() => {
                     const item = quickViewItem;
@@ -2187,19 +2367,23 @@ function DashboardPageInner() {
                         <button
                           key={r.id}
                           type="button"
-                          onClick={() => setQuickViewItem(r)}
+                          onClick={() => { setQuickViewItem(r); setQuickViewImageIndex(0); }}
                           className="quickview-related-card"
                           title={`${r.title} — ₱${r.price.toLocaleString()}`}
                           aria-label={`View ${r.title}, ₱${r.price.toLocaleString()}`}
                         >
-                          {r.image_url ? (
-                            <img src={r.image_url} alt={r.title} className="w-full h-full object-cover" />
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center">
-                              <Shirt size={18} className="opacity-30" />
-                            </div>
-                          )}
-                          {r.stock <= 0 && <div className="quickview-related-sold">Sold</div>}
+                          <div className="quickview-related-image">
+                            {r.image_url ? (
+                              <img src={r.image_url} alt={r.title} className="w-full h-full object-cover" />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center">
+                                <Shirt size={18} className="opacity-30" />
+                              </div>
+                            )}
+                            {r.stock <= 0 && <div className="quickview-related-sold">Sold</div>}
+                          </div>
+                          <p className="quickview-related-title">{r.title}</p>
+                          <p className="quickview-related-price">₱{r.price.toLocaleString()}</p>
                         </button>
                       ))}
                     </div>
