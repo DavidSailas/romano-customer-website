@@ -17,6 +17,40 @@ import { COLLECTIONS } from "@/lib/collections";
 /*  light "pattern room" motif used purely as decoration.              */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/*  Footer link config — edit paths/URLs here if a route name differs  */
+/*  from what's below.                                                 */
+/* ------------------------------------------------------------------ */
+const SHOP_LINKS = [
+  "Jeans",
+  "Shorts",
+  "Jackets",
+  "Caps",
+  "T-Shirts",
+  "Polo Shirt",
+  "Short Sleeve",
+  "Long Sleeve",
+];
+
+const ABOUT_LINKS = [
+  { label: "Our Story", href: "/about" },
+  { label: "Brands We Carry", href: "/brands" },
+  { label: "Quality Promise", href: "/quality" },
+];
+
+const HELP_LINKS = [
+  { label: "Sizing Guide", href: "/sizing-guide" },
+  { label: "Shipping & Payment", href: "/shipping" },
+  { label: "Contact", href: "/contact" },
+];
+
+// Placeholder URLs — swap these for your real profiles when ready.
+const SOCIAL_LINKS = [
+  { label: "Instagram", href: "https://instagram.com/houseofromano", aria: "Visit our Instagram", external: true },
+  { label: "Facebook", href: "https://facebook.com/houseofromano", aria: "Visit our Facebook Page", external: true },
+  { label: "Terms", href: "/terms", aria: "Read our Terms of Service", external: false },
+];
+
 const LOOKS = [
   { n: "01", name: "The Straight Jean", swatch: ["#22301F", "#3C4A38"], image: "/looks/straight-jean.jpg" },
   { n: "02", name: "The Cargo Short", swatch: ["#8A3B2A", "#A9573F"], image: "/looks/cargo-short.jpg" },
@@ -506,7 +540,8 @@ export default function Home() {
             <a href="#collections" className="nav-link hover:opacity-70">Collections</a>
             <a href="#atelier" className="nav-link hover:opacity-70">About</a>
             <a href="#looks" className="nav-link hover:opacity-70">Lookbook</a>
-            <a href="#join" className="nav-link hover:opacity-70">Journal</a>
+            <Link href="/news" className="nav-link hover:opacity-70">News</Link>
+            <Link href="/dashboard" className="nav-link hover:opacity-70">Store</Link>
           </nav>
 
           <div className="hidden md:flex items-center gap-5">
@@ -562,7 +597,8 @@ export default function Home() {
             <a href="#collections" onClick={() => setNavOpen(false)}>Collections</a>
             <a href="#atelier" onClick={() => setNavOpen(false)}>About</a>
             <a href="#looks" onClick={() => setNavOpen(false)}>Lookbook</a>
-            <a href="#join" onClick={() => setNavOpen(false)}>Journal</a>
+            <Link href="/news" onClick={() => setNavOpen(false)}>News</Link>
+            <Link href="/dashboard" onClick={() => setNavOpen(false)}>Store</Link>
             <div className="rule my-1" />
             {user ? (
               <>
@@ -687,8 +723,8 @@ export default function Home() {
       <section id="collections" className="max-w-6xl mx-auto px-6 py-20 md:py-28">
         <div className="flex items-end justify-between mb-12 flex-wrap gap-4">
           <div>
-            <p className="eyebrow mb-3">The Rack</p>
-            <h2 className="font-display text-3xl md:text-4xl">Shop By Category</h2>
+            <p className="eyebrow mb-3">Our Collection</p>
+            <h2 className="font-display text-3xl md:text-4xl">Shop by Category</h2>
           </div>
           <Link href="/categories" className="text-sm underline underline-offset-4 hover:opacity-70">View All</Link>
         </div>
@@ -702,13 +738,15 @@ export default function Home() {
                   background: c.image
                     ? "var(--stone)"
                     : `linear-gradient(150deg, ${c.swatch[0]}, ${c.swatch[1]})`,
+                  boxShadow: "inset 0 0 0 1px rgba(28,24,21,0.08)",
                 }}
               >
                 {c.image && (
                   <img
                     src={c.image}
                     alt={c.title}
-                    className="absolute inset-0 w-full h-full object-contain p-3 transition-transform duration-500 group-hover:scale-105"
+                    loading="lazy"
+                    className="absolute inset-0 w-full h-full object-cover object-center transition-transform duration-500 group-hover:scale-105"
                   />
                 )}
               </div>
@@ -726,7 +764,7 @@ export default function Home() {
         <div className="max-w-6xl mx-auto px-6 py-8">
           <p className="eyebrow text-center mb-5">Brands We Carry</p>
           <div className="flex flex-wrap items-center justify-center gap-x-10 gap-y-4">
-            {["Levi's", "New Era", "Essentials", "Champion", "Dickies", "& More"].map((b, i) => (
+            {["Levi's", "New Era", "Essentials", "Champion", "Carhartt", "& More"].map((b, i) => (
               <span key={i} className="font-display text-lg md:text-xl opacity-60">{b}</span>
             ))}
           </div>
@@ -881,19 +919,37 @@ export default function Home() {
           <div>
             <p className="text-xs uppercase tracking-widest opacity-50 mb-4">Shop</p>
             <ul className="space-y-2 opacity-80">
-              <li>Jeans</li><li>Shorts</li><li>Jackets</li><li>Caps</li><li>T-Shirts</li>
+              {SHOP_LINKS.map((item) => (
+                <li key={item}>
+                  <Link href={`/dashboard?category=${encodeURIComponent(item)}`} className="hover:opacity-100 transition-opacity">
+                    {item}
+                  </Link>
+                </li>
+              ))}
             </ul>
           </div>
           <div>
             <p className="text-xs uppercase tracking-widest opacity-50 mb-4">About</p>
             <ul className="space-y-2 opacity-80">
-              <li>Our Story</li><li>Brands We Carry</li><li>Quality Promise</li>
+              {ABOUT_LINKS.map((item) => (
+                <li key={item.label}>
+                  <Link href={item.href} className="hover:opacity-100 transition-opacity">
+                    {item.label}
+                  </Link>
+                </li>
+              ))}
             </ul>
           </div>
           <div>
             <p className="text-xs uppercase tracking-widest opacity-50 mb-4">Help</p>
             <ul className="space-y-2 opacity-80">
-              <li>Sizing Guide</li><li>Shipping &amp; Payment</li><li>Contact</li>
+              {HELP_LINKS.map((item) => (
+                <li key={item.label}>
+                  <Link href={item.href} className="hover:opacity-100 transition-opacity">
+                    {item.label}
+                  </Link>
+                </li>
+              ))}
             </ul>
           </div>
         </div>
@@ -901,9 +957,18 @@ export default function Home() {
         <div className="flex flex-col sm:flex-row justify-between gap-3 text-xs opacity-50">
           <p>© 2026 House of Romano. All rights reserved.</p>
           <div className="flex gap-5">
-            <a href="#" className="hover:opacity-100" aria-label="Visit our Instagram">Instagram</a>
-            <a href="#" className="hover:opacity-100" aria-label="Visit our Facebook Page">Facebook</a>
-            <a href="#" className="hover:opacity-100" aria-label="Read our Terms of Service">Terms</a>
+            {SOCIAL_LINKS.map((item) => (
+              <a
+                key={item.label}
+                href={item.href}
+                target={item.external ? "_blank" : undefined}
+                rel={item.external ? "noopener noreferrer" : undefined}
+                className="hover:opacity-100"
+                aria-label={item.aria}
+              >
+                {item.label}
+              </a>
+            ))}
           </div>
         </div>
       </footer>
